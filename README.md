@@ -40,29 +40,6 @@ This plugin is based on the methods described in:
 
 ---
 
-## Installation
-
-### From ZIP (recommended)
-
-1. Download `jgraph_qgis.zip` from the [Releases](https://github.com/HdMiii/SS_Jgraph/releases) page
-2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**
-3. Browse to the downloaded zip and click **Install Plugin**
-4. Enable the plugin under the **Installed** tab if not already active
-
-### Manual
-
-Copy the `jgraph_qgis/` folder to your QGIS plugins directory:
-
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/` |
-| Linux | `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/` |
-| Windows | `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\` |
-
-Then restart QGIS and enable the plugin via **Plugins → Manage and Install Plugins**.
-
----
-
 ## Usage
 
 ### 1. Prepare your data
@@ -94,29 +71,11 @@ Results are written to the node layer immediately. Use **Layer → Symbology** t
 
 ---
 
-## Metrics Reference
-
-Full formulas and definitions are in [METRICS.md](METRICS.md).
-
----
-
 ## Requirements
 
 - QGIS 3.0 or later
 - Python 3 (bundled with QGIS)
 - No additional Python packages required
-
----
-
-## Repository
-
-https://github.com/HdMiii/SS_Jgraph
-
----
-
-## Author
-
-**deminhu** — demin.hu.22@ucl.ac.uk
 
 ---
 
