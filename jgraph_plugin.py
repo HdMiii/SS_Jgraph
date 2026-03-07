@@ -96,6 +96,19 @@ class JGraphPlugin:
             QMessageBox.warning(None, "J-Graph", "Node layer has no valid point features.")
             return
 
+        # --- Check layer is editable ---
+        caps = node_layer.dataProvider().capabilities()
+        from qgis.core import QgsVectorDataProvider
+        if not (caps & QgsVectorDataProvider.AddAttributes and
+                caps & QgsVectorDataProvider.ChangeAttributeValues):
+            QMessageBox.warning(
+                None, "J-Graph",
+                f"The node layer '{node_layer.name()}' does not support editing.\n\n"
+                "Please save your layer as a GeoPackage or Shapefile first:\n"
+                "Right-click the layer → Export → Save Features As."
+            )
+            return
+
         # --- Validate base node ---
         if base_fid is None or base_fid not in node_geoms:
             QMessageBox.warning(None, "J-Graph", "Selected base node was not found in the node layer.")
@@ -286,7 +299,7 @@ class JGraphPlugin:
         QgsProject.instance().addMapLayer(node_vl)
 
     def _ensure_fields(self, layer, overwrite):
-        """Add output fields to layer if they don't exist (or if overwrite, they already exist — no action needed)."""
+        """Add output fields to layer if they don't exist."""
         existing = [f.name() for f in layer.fields()]
         new_fields = []
         for name, vtype, _ in OUTPUT_FIELDS:
@@ -294,6 +307,5 @@ class JGraphPlugin:
                 new_fields.append(QgsField(name, vtype))
 
         if new_fields:
-            with edit(layer):
-                layer.dataProvider().addAttributes(new_fields)
-                layer.updateFields()
+            layer.dataProvider().addAttributes(new_fields)
+            layer.updateFields()
