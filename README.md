@@ -79,6 +79,12 @@ Results are written to the node layer immediately. Use **Layer → Symbology** t
 
 ---
 
+## Repository
+
+https://github.com/HdMiii/SS_Jgraph
+
+---
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for details.
