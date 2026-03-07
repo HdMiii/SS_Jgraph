@@ -77,6 +77,14 @@ class JGraphDialog(QDialog):
         self.overwrite_check.setChecked(True)
         opt_form.addRow(self.overwrite_check)
 
+        self.layout_check = QCheckBox("Generate j-graph layout layers")
+        self.layout_check.setChecked(True)
+        self.layout_check.setToolTip(
+            "Creates two new temporary layers showing the classic tree-like j-graph diagram,\n"
+            "with the base node at the bottom and spaces arranged by depth level."
+        )
+        opt_form.addRow(self.layout_check)
+
         layout.addWidget(opt_group)
 
         # --- Output fields info ---
@@ -156,6 +164,9 @@ class JGraphDialog(QDialog):
 
     def get_overwrite(self):
         return self.overwrite_check.isChecked()
+
+    def get_generate_layout(self):
+        return self.layout_check.isChecked()
 
     def get_base_node_fid(self):
         """Return the feature ID of the selected base node, or None."""

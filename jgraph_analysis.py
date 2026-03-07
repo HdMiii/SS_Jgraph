@@ -138,6 +138,68 @@ def run_analysis(node_ids, edge_pairs):
     return results
 
 
+def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacing=1.0):
+    """
+    Compute (x, y) positions for a classic justified graph layout.
+
+    - Base node (depth 0) is placed at the bottom centre (y = 0).
+    - Each successive depth level is placed one level_spacing unit higher.
+    - Nodes within a level are spread horizontally (centred around x = 0),
+      sorted by their BFS-tree parent's x position so children appear
+      directly above their parent.
+
+    Args:
+        graph:           adjacency dict { node_id: [neighbor_id, ...] }
+        depth_from_root: dict { node_id: depth (int) or None if unreachable }
+        node_spacing:    horizontal distance between nodes at the same level
+        level_spacing:   vertical distance between depth levels
+
+    Returns:
+        dict { node_id: (x, y) } — only reachable nodes are included
+    """
+    # Group reachable nodes by depth
+    levels = {}
+    for node_id, depth in depth_from_root.items():
+        if depth is None:
+            continue
+        levels.setdefault(depth, []).append(node_id)
+
+    if not levels:
+        return {}
+
+    # Build BFS-tree parent map: for each node, find the neighbour one level up
+    parent = {}
+    for node_id, depth in depth_from_root.items():
+        if depth is None or depth == 0:
+            continue
+        for neighbor in graph[node_id]:
+            if depth_from_root.get(neighbor) == depth - 1:
+                parent[node_id] = neighbor
+                break
+
+    positions = {}
+    max_depth = max(levels.keys())
+
+    # Place root at origin
+    for node_id in levels.get(0, []):
+        positions[node_id] = (0.0, 0.0)
+
+    # Place each level above the previous
+    for depth in range(1, max_depth + 1):
+        nodes = levels.get(depth, [])
+        if not nodes:
+            continue
+        # Sort by parent x so children cluster under their parent
+        nodes.sort(key=lambda n: positions.get(parent.get(n), (0.0, 0.0))[0])
+        n = len(nodes)
+        for i, node_id in enumerate(nodes):
+            x = (i - (n - 1) / 2.0) * node_spacing
+            y = depth * level_spacing
+            positions[node_id] = (x, y)
+
+    return positions
+
+
 def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e-6):
     """
     For each line, find which nodes its start/end points snap to (within tolerance).

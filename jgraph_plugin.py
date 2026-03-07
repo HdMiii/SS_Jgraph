@@ -10,13 +10,16 @@ import os
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
-    QgsVectorLayer, QgsField, QgsFeature, QgsProject,
-    QgsWkbTypes, edit
+    QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY,
+    QgsProject, QgsWkbTypes, edit
 )
 from qgis.PyQt.QtCore import QVariant
 
 from .jgraph_dialog import JGraphDialog
-from .jgraph_analysis import run_analysis, match_line_endpoints_to_nodes, bfs_depth, build_graph
+from .jgraph_analysis import (
+    run_analysis, match_line_endpoints_to_nodes, bfs_depth,
+    build_graph, compute_jgraph_layout
+)
 
 # Fields written to the node layer
 OUTPUT_FIELDS = [
@@ -71,14 +74,15 @@ class JGraphPlugin:
             return
 
         base_fid = dlg.get_base_node_fid()
+        generate_layout = dlg.get_generate_layout()
 
         try:
-            self._run_analysis(node_layer, edge_layer, tolerance, overwrite, base_fid, dlg)
+            self._run_analysis(node_layer, edge_layer, tolerance, overwrite, base_fid, generate_layout, dlg)
         except Exception as e:
             QMessageBox.critical(None, "J-Graph Error", str(e))
             raise
 
-    def _run_analysis(self, node_layer, edge_layer, tolerance, overwrite, base_fid, dlg):
+    def _run_analysis(self, node_layer, edge_layer, tolerance, overwrite, base_fid, generate_layout, dlg):
         # --- Collect node geometries ---
         node_geoms = {}   # fid -> QgsPointXY
         for feat in node_layer.getFeatures():
@@ -168,9 +172,14 @@ class JGraphPlugin:
 
         node_layer.triggerRepaint()
 
+        # --- Generate layout layers ---
+        if generate_layout:
+            self._create_layout_layers(graph, depth_from_root, edge_pairs, results)
+
         # --- Summary ---
         reachable = sum(1 for d in depth_from_root.values() if d is not None)
         integrated = sum(1 for r in results.values() if r.get("integration") is not None)
+        layout_note = "\n  Layout layers added to project." if generate_layout else ""
         QMessageBox.information(
             None, "J-Graph Complete",
             f"Analysis complete.\n"
@@ -180,6 +189,7 @@ class JGraphPlugin:
             f"  Nodes with integration:  {integrated}\n\n"
             f"Fields written to '{node_layer.name()}':\n"
             f"  jg_depth, jg_td, jg_nc, jg_md, jg_ra, jg_rra, jg_int"
+            f"{layout_note}"
         )
 
     @staticmethod
@@ -199,6 +209,81 @@ class JGraphPlugin:
                     depths[neighbor] = depths[current] + 1
                     queue.append(neighbor)
         return depths
+
+    def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results):
+        """
+        Create two temporary memory layers showing the j-graph as a classic
+        tree diagram: base node at the bottom, nodes arranged in rows by depth.
+        """
+        positions = compute_jgraph_layout(graph, depth_from_root)
+        if not positions:
+            return
+
+        # --- Node layout layer ---
+        node_vl = QgsVectorLayer("Point?crs=EPSG:4326", "J-Graph Layout — Nodes", "memory")
+        node_pr = node_vl.dataProvider()
+        node_pr.addAttributes([
+            QgsField("node_fid", QVariant.Int),
+            QgsField("jg_depth", QVariant.Int),
+            QgsField("jg_int",   QVariant.Double),
+            QgsField("jg_td",    QVariant.Double),
+            QgsField("jg_md",    QVariant.Double),
+            QgsField("jg_ra",    QVariant.Double),
+            QgsField("jg_rra",   QVariant.Double),
+        ])
+        node_vl.updateFields()
+
+        node_features = []
+        for fid, (x, y) in positions.items():
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+            m = results.get(fid, {})
+            d = depth_from_root.get(fid)
+            feat.setAttributes([
+                fid,
+                int(d) if d is not None else None,
+                m.get("integration"),
+                m.get("total_depth"),
+                m.get("mean_depth"),
+                m.get("ra"),
+                m.get("rra"),
+            ])
+            node_features.append(feat)
+
+        node_pr.addFeatures(node_features)
+        node_vl.updateExtents()
+
+        # --- Edge layout layer ---
+        edge_vl = QgsVectorLayer("LineString?crs=EPSG:4326", "J-Graph Layout — Edges", "memory")
+        edge_pr = edge_vl.dataProvider()
+        edge_pr.addAttributes([
+            QgsField("from_fid", QVariant.Int),
+            QgsField("to_fid",   QVariant.Int),
+        ])
+        edge_vl.updateFields()
+
+        seen = set()
+        edge_features = []
+        for a, b in edge_pairs:
+            key = tuple(sorted([a, b]))
+            if key in seen:
+                continue
+            if a not in positions or b not in positions:
+                continue
+            seen.add(key)
+            ax, ay = positions[a]
+            bx, by = positions[b]
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(ax, ay), QgsPointXY(bx, by)]))
+            feat.setAttributes([a, b])
+            edge_features.append(feat)
+
+        edge_pr.addFeatures(edge_features)
+        edge_vl.updateExtents()
+
+        # Add edge layer first so nodes draw on top
+        QgsProject.instance().addMapLayer(edge_vl)
+        QgsProject.instance().addMapLayer(node_vl)
 
     def _ensure_fields(self, layer, overwrite):
         """Add output fields to layer if they don't exist (or if overwrite, they already exist — no action needed)."""
