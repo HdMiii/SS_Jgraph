@@ -187,7 +187,9 @@ class JGraphPlugin:
 
         # --- Generate layout layers ---
         if generate_layout:
-            self._create_layout_layers(graph, depth_from_root, edge_pairs, results)
+            base_pt = node_geoms[base_fid]
+            self._create_layout_layers(graph, depth_from_root, edge_pairs, results,
+                                       origin=(base_pt.x(), base_pt.y()))
 
         # --- Summary ---
         reachable = sum(1 for d in depth_from_root.values() if d is not None)
@@ -223,12 +225,13 @@ class JGraphPlugin:
                     queue.append(neighbor)
         return depths
 
-    def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results):
+    def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results, origin=(0.0, 0.0)):
         """
         Create two temporary memory layers showing the j-graph as a classic
-        tree diagram: base node at the bottom, nodes arranged in rows by depth.
+        tree diagram: base node stays at its real geographic location,
+        other nodes arranged in rows by depth above it.
         """
-        positions = compute_jgraph_layout(graph, depth_from_root)
+        positions = compute_jgraph_layout(graph, depth_from_root, origin=origin)
         if not positions:
             return
 

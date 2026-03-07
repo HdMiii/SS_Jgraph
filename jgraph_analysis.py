@@ -138,13 +138,14 @@ def run_analysis(node_ids, edge_pairs):
     return results
 
 
-def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacing=1.0):
+def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacing=1.0, origin=(0.0, 0.0)):
     """
     Compute (x, y) positions for a classic justified graph layout.
 
-    - Base node (depth 0) is placed at the bottom centre (y = 0).
+    - Base node (depth 0) is placed at `origin` (default: 0, 0).
+      Pass the base node's real geographic coordinates to anchor the diagram there.
     - Each successive depth level is placed one level_spacing unit higher.
-    - Nodes within a level are spread horizontally (centred around x = 0),
+    - Nodes within a level are spread horizontally (centred around origin x),
       sorted by their BFS-tree parent's x position so children appear
       directly above their parent.
 
@@ -153,6 +154,7 @@ def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacin
         depth_from_root: dict { node_id: depth (int) or None if unreachable }
         node_spacing:    horizontal distance between nodes at the same level
         level_spacing:   vertical distance between depth levels
+        origin:          (x, y) of the base node (depth 0)
 
     Returns:
         dict { node_id: (x, y) } — only reachable nodes are included
@@ -179,10 +181,11 @@ def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacin
 
     positions = {}
     max_depth = max(levels.keys())
+    ox, oy = origin
 
-    # Place root at origin
+    # Place root at the real origin (base node's geographic location)
     for node_id in levels.get(0, []):
-        positions[node_id] = (0.0, 0.0)
+        positions[node_id] = (ox, oy)
 
     # Place each level above the previous
     for depth in range(1, max_depth + 1):
@@ -190,11 +193,11 @@ def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacin
         if not nodes:
             continue
         # Sort by parent x so children cluster under their parent
-        nodes.sort(key=lambda n: positions.get(parent.get(n), (0.0, 0.0))[0])
+        nodes.sort(key=lambda n: positions.get(parent.get(n), (ox, oy))[0])
         n = len(nodes)
         for i, node_id in enumerate(nodes):
-            x = (i - (n - 1) / 2.0) * node_spacing
-            y = depth * level_spacing
+            x = ox + (i - (n - 1) / 2.0) * node_spacing
+            y = oy + depth * level_spacing
             positions[node_id] = (x, y)
 
     return positions
