@@ -247,6 +247,6 @@ def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e
         a = snap(sx, sy)
         b = snap(ex, ey)
         if a is not None and b is not None and a != b:
-            edges.append((a, b))
+            edges.append((a, b, _lid))
 
     return edges

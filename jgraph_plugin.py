@@ -132,7 +132,10 @@ class JGraphPlugin:
             return
 
         # --- Match line endpoints to nodes ---
-        edge_pairs = match_line_endpoints_to_nodes(node_geoms, edge_geoms, tolerance)
+        edge_triples = match_line_endpoints_to_nodes(node_geoms, edge_geoms, tolerance)
+        edge_pairs = [(a, b) for a, b, _ in edge_triples]
+        # Map sorted node pair -> original edge fid for attribute inheritance
+        edge_line_map = {tuple(sorted([a, b])): lid for a, b, lid in edge_triples}
 
         if not edge_pairs:
             QMessageBox.warning(
@@ -189,7 +192,9 @@ class JGraphPlugin:
         if generate_layout:
             base_pt = node_geoms[base_fid]
             self._create_layout_layers(graph, depth_from_root, edge_pairs, results,
-                                       origin=(base_pt.x(), base_pt.y()))
+                                       origin=(base_pt.x(), base_pt.y()),
+                                       node_layer=node_layer, edge_layer=edge_layer,
+                                       edge_line_map=edge_line_map)
 
         # --- Summary ---
         reachable = sum(1 for d in depth_from_root.values() if d is not None)
@@ -225,45 +230,83 @@ class JGraphPlugin:
                     queue.append(neighbor)
         return depths
 
-    def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results, origin=(0.0, 0.0)):
+    def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results, origin=(0.0, 0.0),
+                              node_layer=None, edge_layer=None, edge_line_map=None):
         """
         Create two temporary memory layers showing the j-graph as a classic
         tree diagram: base node stays at its real geographic location,
         other nodes arranged in rows by depth above it.
+
+        All attributes from the original node and edge layers are inherited.
         """
         positions = compute_jgraph_layout(graph, depth_from_root, origin=origin)
         if not positions:
             return
 
+        # --- Build lookup dicts for original features ---
+        orig_node_feats = {}
+        if node_layer is not None:
+            for feat in node_layer.getFeatures():
+                orig_node_feats[feat.id()] = feat
+
+        orig_edge_feats = {}
+        if edge_layer is not None:
+            for feat in edge_layer.getFeatures():
+                orig_edge_feats[feat.id()] = feat
+
         # --- Node layout layer ---
         node_vl = QgsVectorLayer("Point?crs=EPSG:4326", "J-Graph Layout — Nodes", "memory")
         node_pr = node_vl.dataProvider()
-        node_pr.addAttributes([
-            QgsField("node_fid", QVariant.Int),
-            QgsField("jg_depth", QVariant.Int),
-            QgsField("jg_int",   QVariant.Double),
-            QgsField("jg_td",    QVariant.Double),
-            QgsField("jg_md",    QVariant.Double),
-            QgsField("jg_ra",    QVariant.Double),
-            QgsField("jg_rra",   QVariant.Double),
-        ])
+
+        # Build field list: original node fields (already include jg_* written earlier) + node_fid
+        node_fields = []
+        orig_node_field_names = set()
+        if node_layer is not None:
+            for f in node_layer.fields():
+                node_fields.append(QgsField(f.name(), f.type(), f.typeName(),
+                                            f.length(), f.precision()))
+                orig_node_field_names.add(f.name())
+        if "node_fid" not in orig_node_field_names:
+            node_fields.append(QgsField("node_fid", QVariant.Int))
+        # Fallback jg fields when no original layer provided
+        if node_layer is None:
+            node_fields += [
+                QgsField("node_fid", QVariant.Int),
+                QgsField("jg_depth", QVariant.Int),
+                QgsField("jg_int",   QVariant.Double),
+                QgsField("jg_td",    QVariant.Double),
+                QgsField("jg_md",    QVariant.Double),
+                QgsField("jg_ra",    QVariant.Double),
+                QgsField("jg_rra",   QVariant.Double),
+            ]
+
+        node_pr.addAttributes(node_fields)
         node_vl.updateFields()
 
         node_features = []
         for fid, (x, y) in positions.items():
             feat = QgsFeature()
             feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
-            m = results.get(fid, {})
-            d = depth_from_root.get(fid)
-            feat.setAttributes([
-                fid,
-                int(d) if d is not None else None,
-                m.get("integration"),
-                m.get("total_depth"),
-                m.get("mean_depth"),
-                m.get("ra"),
-                m.get("rra"),
-            ])
+
+            if node_layer is not None:
+                orig = orig_node_feats.get(fid)
+                attrs = list(orig.attributes()) if orig is not None else [None] * len(node_layer.fields())
+                if "node_fid" not in orig_node_field_names:
+                    attrs.append(fid)
+            else:
+                m = results.get(fid, {})
+                d = depth_from_root.get(fid)
+                attrs = [
+                    fid,
+                    int(d) if d is not None else None,
+                    m.get("integration"),
+                    m.get("total_depth"),
+                    m.get("mean_depth"),
+                    m.get("ra"),
+                    m.get("rra"),
+                ]
+
+            feat.setAttributes(attrs)
             node_features.append(feat)
 
         node_pr.addFeatures(node_features)
@@ -272,10 +315,23 @@ class JGraphPlugin:
         # --- Edge layout layer ---
         edge_vl = QgsVectorLayer("LineString?crs=EPSG:4326", "J-Graph Layout — Edges", "memory")
         edge_pr = edge_vl.dataProvider()
-        edge_pr.addAttributes([
-            QgsField("from_fid", QVariant.Int),
-            QgsField("to_fid",   QVariant.Int),
-        ])
+
+        # Build field list: original edge fields + from_fid / to_fid identifiers
+        edge_fields = []
+        orig_edge_field_names = set()
+        if edge_layer is not None:
+            for f in edge_layer.fields():
+                edge_fields.append(QgsField(f.name(), f.type(), f.typeName(),
+                                            f.length(), f.precision()))
+                orig_edge_field_names.add(f.name())
+        if "from_fid" not in orig_edge_field_names:
+            edge_fields.append(QgsField("from_fid", QVariant.Int))
+        if "to_fid" not in orig_edge_field_names:
+            edge_fields.append(QgsField("to_fid", QVariant.Int))
+        if edge_layer is None:
+            edge_fields = [QgsField("from_fid", QVariant.Int), QgsField("to_fid", QVariant.Int)]
+
+        edge_pr.addAttributes(edge_fields)
         edge_vl.updateFields()
 
         seen = set()
@@ -287,11 +343,23 @@ class JGraphPlugin:
             if a not in positions or b not in positions:
                 continue
             seen.add(key)
+
+            if edge_layer is not None:
+                orig_eid = edge_line_map.get(key) if edge_line_map else None
+                orig = orig_edge_feats.get(orig_eid) if orig_eid is not None else None
+                attrs = list(orig.attributes()) if orig is not None else [None] * len(edge_layer.fields())
+                if "from_fid" not in orig_edge_field_names:
+                    attrs.append(a)
+                if "to_fid" not in orig_edge_field_names:
+                    attrs.append(b)
+            else:
+                attrs = [a, b]
+
             ax, ay = positions[a]
             bx, by = positions[b]
             feat = QgsFeature()
             feat.setGeometry(QgsGeometry.fromPolylineXY([QgsPointXY(ax, ay), QgsPointXY(bx, by)]))
-            feat.setAttributes([a, b])
+            feat.setAttributes(attrs)
             edge_features.append(feat)
 
         edge_pr.addFeatures(edge_features)
