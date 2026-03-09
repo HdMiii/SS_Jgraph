@@ -2,7 +2,7 @@
 name=JGraph Analysis
 qgisMinimumVersion=3.0
 description=J-Graph (Justified Graph) space syntax analysis for building layouts. Calculates integration, mean depth, and relative asymmetry for point/line graph layers.
-version=0.1.0
+version=0.2.0
 author=deminhu
 email=demin.hu.22@ucl.ac.uk
 about=Performs Space Syntax j-graph analysis on QGIS point and line layers representing building/urban spatial networks. Outputs integration scores, mean depth, relative asymmetry, and real relative asymmetry as attributes on the node layer. Based on: Hillier, B., Hanson, J. and Graham, H. (1987). Ideas are in things: an application of the space syntax method to discovering house genotypes. Environment and Planning B, 14(4), pp.363-385.
