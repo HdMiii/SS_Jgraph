@@ -118,19 +118,21 @@ def calculate_integration(total_depth, node_count):
     return result
 
 
-def run_analysis(node_ids, edge_pairs):
+def run_analysis(node_ids, edge_pairs, graph=None):
     """
     Run full j-graph analysis for all nodes.
 
     Args:
         node_ids: iterable of node identifiers
         edge_pairs: iterable of (id_a, id_b) tuples (undirected edges)
+        graph: optional pre-built adjacency dict; built from node_ids/edge_pairs if None
 
     Returns:
         dict: { node_id: { total_depth, node_count, mean_depth, ra, rra, integration } }
     """
     node_ids = list(node_ids)
-    graph = build_graph(node_ids, edge_pairs)
+    if graph is None:
+        graph = build_graph(node_ids, edge_pairs)
     results = {}
     for nid in node_ids:
         td, nc = bfs_depth(graph, nid)
@@ -203,6 +205,128 @@ def compute_jgraph_layout(graph, depth_from_root, node_spacing=1.0, level_spacin
     return positions
 
 
+def compute_radial_layout(graph, depth_from_root, ring_spacing=1.0, origin=(0.0, 0.0)):
+    """
+    Compute (x, y) positions for a radial justified graph layout.
+
+    - Base node (depth 0) is placed at `origin`.
+    - Each successive depth level forms a concentric ring at radius = depth * ring_spacing.
+    - Depth-1 nodes are evenly spaced around the full circle (e.g. 3 nodes = 120° each).
+    - Deeper nodes stay within their depth-1 ancestor's angular sector,
+      subdivided proportionally by subtree leaf count so branches are visually distinct.
+
+    Args:
+        graph:           adjacency dict { node_id: [neighbor_id, ...] }
+        depth_from_root: dict { node_id: depth (int) or None if unreachable }
+        ring_spacing:    radial distance between concentric depth rings
+        origin:          (x, y) of the base node (depth 0)
+
+    Returns:
+        dict { node_id: (x, y) } — only reachable nodes are included
+    """
+    # Group reachable nodes by depth
+    levels = {}
+    for node_id, depth in depth_from_root.items():
+        if depth is None:
+            continue
+        levels.setdefault(depth, []).append(node_id)
+
+    if not levels:
+        return {}
+
+    # Build BFS-tree parent map and children map
+    parent = {}
+    children = {}
+    for node_id, depth in depth_from_root.items():
+        if depth is None or depth == 0:
+            continue
+        for neighbor in graph[node_id]:
+            if depth_from_root.get(neighbor) == depth - 1:
+                parent[node_id] = neighbor
+                children.setdefault(neighbor, []).append(node_id)
+                break
+
+    max_depth = max(levels.keys())
+
+    # Memoized leaf count for proportional angular allocation
+    _leaf_cache = {}
+
+    def leaf_count(node):
+        if node in _leaf_cache:
+            return _leaf_cache[node]
+        kids = children.get(node, [])
+        if not kids:
+            result = 1
+        else:
+            result = sum(leaf_count(c) for c in kids)
+        _leaf_cache[node] = result
+        return result
+
+    positions = {}
+    ox, oy = origin
+
+    # Place root at origin
+    for node_id in levels.get(0, []):
+        positions[node_id] = (ox, oy)
+
+    if max_depth == 0:
+        return positions
+
+    # sectors[node_id] = (angle_start, angle_end)
+    sectors = {}
+
+    # Depth 1: equal angular sectors
+    depth1_nodes = levels.get(1, [])
+    n1 = len(depth1_nodes)
+    if n1 == 0:
+        return positions
+
+    sector_sweep = 2.0 * math.pi / n1
+    for i, node_id in enumerate(depth1_nodes):
+        a_start = i * sector_sweep
+        a_end = a_start + sector_sweep
+        sectors[node_id] = (a_start, a_end)
+        angle_mid = (a_start + a_end) / 2.0
+        x = ox + ring_spacing * math.cos(angle_mid)
+        y = oy + ring_spacing * math.sin(angle_mid)
+        positions[node_id] = (x, y)
+
+    # Depth 2+: subdivide parent's sector proportionally by leaf count
+    for depth in range(2, max_depth + 1):
+        nodes = levels.get(depth, [])
+        if not nodes:
+            continue
+        radius = depth * ring_spacing
+
+        # Group nodes by parent to subdivide each parent's sector
+        by_parent = {}
+        for node_id in nodes:
+            p = parent.get(node_id)
+            by_parent.setdefault(p, []).append(node_id)
+
+        for p, kids in by_parent.items():
+            p_start, p_end = sectors.get(p, (0.0, 2.0 * math.pi))
+            total_leaves = sum(leaf_count(c) for c in kids)
+            if total_leaves == 0:
+                continue
+
+            sub_angle = p_start
+            for child in kids:
+                lc = leaf_count(child)
+                sweep = (p_end - p_start) * lc / total_leaves
+                c_start = sub_angle
+                c_end = sub_angle + sweep
+                sectors[child] = (c_start, c_end)
+
+                angle_mid = (c_start + c_end) / 2.0
+                x = ox + radius * math.cos(angle_mid)
+                y = oy + radius * math.sin(angle_mid)
+                positions[child] = (x, y)
+                sub_angle += sweep
+
+    return positions
+
+
 def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e-6):
     """
     For each line, find which nodes its start/end points snap to (within tolerance).
@@ -213,7 +337,7 @@ def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e
         tolerance: snapping distance
 
     Returns:
-        list of (node_id_a, node_id_b) edge pairs
+        list of (node_id_a, node_id_b, line_id) triples
     """
     def snap(px, py):
         best = None
@@ -231,22 +355,23 @@ def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e
             return best
         return None
 
+    def _vertex_coords(v):
+        try:
+            return v.x(), v.y()
+        except AttributeError:
+            return v[0], v[1]
+
     edges = []
     for lid, vertices in line_geometries.items():
-        if not vertices:
+        if len(vertices) < 2:
             continue
-        try:
-            start = vertices[0]
-            end = vertices[-1]
-            sx, sy = start.x(), start.y()
-            ex, ey = end.x(), end.y()
-        except AttributeError:
-            sx, sy = vertices[0]
-            ex, ey = vertices[-1]
-
-        a = snap(sx, sy)
-        b = snap(ex, ey)
-        if a is not None and b is not None and a != b:
-            edges.append((a, b, lid))
+        # Treat each segment of the polyline as a potential edge
+        for i in range(len(vertices) - 1):
+            sx, sy = _vertex_coords(vertices[i])
+            ex, ey = _vertex_coords(vertices[i + 1])
+            a = snap(sx, sy)
+            b = snap(ex, ey)
+            if a is not None and b is not None and a != b:
+                edges.append((a, b, lid))
 
     return edges

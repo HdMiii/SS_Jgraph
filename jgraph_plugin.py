@@ -11,14 +11,14 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsVectorLayer, QgsVectorDataProvider, QgsField, QgsFeature,
-    QgsGeometry, QgsPointXY, QgsProject, QgsWkbTypes, edit
+    QgsGeometry, QgsPointXY, QgsProject
 )
 from qgis.PyQt.QtCore import QVariant
 
 from .jgraph_dialog import JGraphDialog
 from .jgraph_analysis import (
     run_analysis, match_line_endpoints_to_nodes,
-    build_graph, compute_jgraph_layout
+    build_graph, compute_jgraph_layout, compute_radial_layout
 )
 
 # Fields written to the node layer
@@ -75,14 +75,19 @@ class JGraphPlugin:
 
         base_fid = dlg.get_base_node_fid()
         generate_layout = dlg.get_generate_layout()
+        node_spacing = dlg.get_node_spacing()
+        level_spacing = dlg.get_level_spacing()
+        layout_type = dlg.get_layout_type()
 
         try:
-            self._run_analysis(node_layer, edge_layer, tolerance, overwrite, base_fid, generate_layout, dlg)
+            self._run_analysis(node_layer, edge_layer, tolerance, overwrite, base_fid,
+                               generate_layout, node_spacing, level_spacing, layout_type, dlg)
         except Exception as e:
             QMessageBox.critical(None, "J-Graph Error", str(e))
             raise
 
-    def _run_analysis(self, node_layer, edge_layer, tolerance, overwrite, base_fid, generate_layout, dlg):
+    def _run_analysis(self, node_layer, edge_layer, tolerance, overwrite, base_fid,
+                       generate_layout, node_spacing, level_spacing, layout_type, dlg):
         # --- Check for projected CRS ---
         node_crs = node_layer.crs()
         if node_crs.isGeographic():
@@ -92,8 +97,7 @@ class JGraphPlugin:
                 f"({node_crs.authid()}).\n\n"
                 "J-Graph analysis requires a projected CRS so that distances "
                 "are in linear units (metres, feet, etc.).\n\n"
-                "Please reproject your layers first:\n"
-                "  Processing → Toolbox → Reproject Layer"
+                "Please reproject your layers to a projected CRS first."
             )
             return
 
@@ -103,8 +107,12 @@ class JGraphPlugin:
             geom = feat.geometry()
             if geom is None or geom.isEmpty():
                 continue
-            pt = geom.asPoint()
-            node_geoms[feat.id()] = pt
+            # Handle both Point and MultiPoint geometries
+            multi_geom = QgsGeometry(geom)
+            multi_geom.convertToMultiType()
+            pts = multi_geom.asMultiPoint()
+            if pts:
+                node_geoms[feat.id()] = pts[0]
 
         if not node_geoms:
             QMessageBox.warning(None, "J-Graph", "Node layer has no valid point features.")
@@ -128,17 +136,28 @@ class JGraphPlugin:
             return
 
         # --- Collect edge geometries ---
-        edge_geoms = {}   # fid -> list of QgsPointXY (polyline vertices)
+        # Convert every geometry to multi so all cases are handled uniformly.
+        # Each part becomes a separate entry; for multi-part features the key
+        # is (fid, part_index), for single-part features just fid.
+        edge_geoms = {}
+        edge_fid_lookup = {}  # edge_key -> original feature id
         for feat in edge_layer.getFeatures():
             geom = feat.geometry()
             if geom is None or geom.isEmpty():
                 continue
-            if QgsWkbTypes.isMultiType(geom.wkbType()):
-                parts = geom.asMultiPolyline()
-                if parts:
-                    edge_geoms[feat.id()] = parts[0]
+            fid = feat.id()
+            # convertToMultiType() is non-destructive if already multi
+            multi_geom = QgsGeometry(geom)
+            multi_geom.convertToMultiType()
+            parts = multi_geom.asMultiPolyline()
+            if len(parts) == 1:
+                edge_geoms[fid] = parts[0]
+                edge_fid_lookup[fid] = fid
             else:
-                edge_geoms[feat.id()] = geom.asPolyline()
+                for i, part in enumerate(parts):
+                    key = (fid, i)
+                    edge_geoms[key] = part
+                    edge_fid_lookup[key] = fid
 
         if not edge_geoms:
             QMessageBox.warning(None, "J-Graph", "Edge layer has no valid line features.")
@@ -147,8 +166,9 @@ class JGraphPlugin:
         # --- Match line endpoints to nodes ---
         edge_triples = match_line_endpoints_to_nodes(node_geoms, edge_geoms, tolerance)
         edge_pairs = [(a, b) for a, b, _ in edge_triples]
-        # Map sorted node pair -> original edge fid for attribute inheritance
-        edge_line_map = {tuple(sorted([a, b])): lid for a, b, lid in edge_triples}
+        # Map sorted node pair -> original feature id for attribute inheritance
+        edge_line_map = {tuple(sorted([a, b])): edge_fid_lookup.get(lid, lid)
+                         for a, b, lid in edge_triples}
 
         if not edge_pairs:
             QMessageBox.warning(
@@ -167,7 +187,17 @@ class JGraphPlugin:
         depth_from_root = self._bfs_depths(graph, base_fid)
 
         # --- Global integration (BFS from every node) ---
-        results = run_analysis(node_ids, edge_pairs)
+        results = run_analysis(node_ids, edge_pairs, graph=graph)
+
+        # --- Start edit session before modifying fields ---
+        already_editing = node_layer.isEditable()
+        if not already_editing and not node_layer.startEditing():
+            QMessageBox.warning(
+                None, "J-Graph",
+                f"Could not start editing on '{node_layer.name()}'.\n\n"
+                "The data source may not support editing."
+            )
+            return
 
         # --- Ensure output fields exist on node layer ---
         self._ensure_fields(node_layer, overwrite)
@@ -179,25 +209,35 @@ class JGraphPlugin:
         total = len(results)
         dlg.set_progress(0, total)
 
-        with edit(node_layer):
-            for i, (fid, metrics) in enumerate(results.items()):
-                attrs = {}
+        for i, (fid, metrics) in enumerate(results.items()):
+            attrs = {}
 
-                # Depth from base node
-                depth_idx = field_indices.get("jg_depth", -1)
-                if depth_idx >= 0:
-                    d = depth_from_root.get(fid)
-                    attrs[depth_idx] = int(d) if d is not None else None
+            # Depth from base node
+            depth_idx = field_indices.get("jg_depth", -1)
+            if depth_idx >= 0:
+                d = depth_from_root.get(fid)
+                attrs[depth_idx] = int(d) if d is not None else None
 
-                # Global metrics
-                for field_name, result_key in RESULT_KEYS.items():
-                    idx = field_indices.get(field_name, -1)
-                    if idx >= 0:
-                        val = metrics.get(result_key)
-                        attrs[idx] = float(val) if val is not None else None
+            # Global metrics
+            for field_name, result_key in RESULT_KEYS.items():
+                idx = field_indices.get(field_name, -1)
+                if idx >= 0:
+                    val = metrics.get(result_key)
+                    attrs[idx] = float(val) if val is not None else None
 
-                node_layer.changeAttributeValues(fid, attrs)
-                dlg.set_progress(i + 1, total)
+            node_layer.changeAttributeValues(fid, attrs)
+            dlg.set_progress(i + 1, total)
+
+        # Only commit if we started the edit session
+        if not already_editing:
+            if not node_layer.commitChanges():
+                QMessageBox.warning(
+                    None, "J-Graph",
+                    f"Failed to save changes to '{node_layer.name()}':\n"
+                    f"{node_layer.commitErrors()}"
+                )
+                node_layer.rollBack()
+                return
 
         node_layer.triggerRepaint()
 
@@ -206,6 +246,9 @@ class JGraphPlugin:
             base_pt = node_geoms[base_fid]
             self._create_layout_layers(graph, depth_from_root, edge_pairs, results,
                                        origin=(base_pt.x(), base_pt.y()),
+                                       node_spacing=node_spacing,
+                                       level_spacing=level_spacing,
+                                       layout_type=layout_type,
                                        node_layer=node_layer, edge_layer=edge_layer,
                                        edge_line_map=edge_line_map)
 
@@ -217,7 +260,7 @@ class JGraphPlugin:
             None, "J-Graph Complete",
             f"Analysis complete.\n"
             f"  Nodes processed:         {len(results)}\n"
-            f"  Edges matched:           {len(edge_pairs)}\n"
+            f"  Edges matched:           {len(edge_line_map)}\n"
             f"  Reachable from base:     {reachable}\n"
             f"  Nodes with integration:  {integrated}\n\n"
             f"Fields written to '{node_layer.name()}':\n"
@@ -244,15 +287,23 @@ class JGraphPlugin:
         return depths
 
     def _create_layout_layers(self, graph, depth_from_root, edge_pairs, results, origin=(0.0, 0.0),
+                              node_spacing=10.0, level_spacing=10.0, layout_type="tree",
                               node_layer=None, edge_layer=None, edge_line_map=None):
         """
-        Create two temporary memory layers showing the j-graph as a classic
-        tree diagram: base node stays at its real geographic location,
-        other nodes arranged in rows by depth above it.
+        Create two temporary memory layers showing the j-graph layout.
 
+        Supports 'tree' (top-down) and 'radial' (concentric circles) layouts.
         All attributes from the original node and edge layers are inherited.
         """
-        positions = compute_jgraph_layout(graph, depth_from_root, origin=origin)
+        if layout_type == "radial":
+            positions = compute_radial_layout(graph, depth_from_root,
+                                              ring_spacing=level_spacing,
+                                              origin=origin)
+        else:
+            positions = compute_jgraph_layout(graph, depth_from_root,
+                                              node_spacing=node_spacing,
+                                              level_spacing=level_spacing,
+                                              origin=origin)
         if not positions:
             return
 
@@ -269,7 +320,8 @@ class JGraphPlugin:
 
         # --- Node layout layer ---
         crs_id = node_layer.crs().authid() if node_layer is not None else "EPSG:4326"
-        node_vl = QgsVectorLayer(f"Point?crs={crs_id}", "J-Graph Layout — Nodes", "memory")
+        type_label = "Radial" if layout_type == "radial" else "Tree"
+        node_vl = QgsVectorLayer(f"Point?crs={crs_id}", f"J-Graph {type_label} — Nodes", "memory")
         node_pr = node_vl.dataProvider()
 
         # Build field list: original node fields (already include jg_* written earlier) + node_fid
@@ -327,7 +379,7 @@ class JGraphPlugin:
         node_vl.updateExtents()
 
         # --- Edge layout layer ---
-        edge_vl = QgsVectorLayer(f"LineString?crs={crs_id}", "J-Graph Layout — Edges", "memory")
+        edge_vl = QgsVectorLayer(f"LineString?crs={crs_id}", f"J-Graph {type_label} — Edges", "memory")
         edge_pr = edge_vl.dataProvider()
 
         # Build field list: original edge fields + from_fid / to_fid identifiers
@@ -383,29 +435,27 @@ class JGraphPlugin:
         QgsProject.instance().addMapLayer(edge_vl)
         QgsProject.instance().addMapLayer(node_vl)
 
-    def _ensure_fields(self, layer, overwrite):
+    @staticmethod
+    def _ensure_fields(layer, overwrite):
         """Add output fields to layer if they don't exist.
+
+        The layer must already be in edit mode. Changes go through the edit
+        buffer so they are committed together with attribute value updates.
 
         If *overwrite* is True and a field already exists, delete it first so
         it is re-created with the canonical type defined in OUTPUT_FIELDS.
         """
-        provider = layer.dataProvider()
         existing = {f.name(): i for i, f in enumerate(layer.fields())}
 
         if overwrite:
-            indices_to_delete = [existing[name] for name, _, _ in OUTPUT_FIELDS
-                                 if name in existing]
-            if indices_to_delete:
-                provider.deleteAttributes(indices_to_delete)
-                layer.updateFields()
+            for name, _, _ in OUTPUT_FIELDS:
+                if name in existing:
+                    layer.deleteAttribute(existing[name])
+            # Re-read indices after deletions
+            layer.updateFields()
 
-        # Re-read after possible deletion
         existing = [f.name() for f in layer.fields()]
-        new_fields = []
         for name, vtype, _ in OUTPUT_FIELDS:
             if name not in existing:
-                new_fields.append(QgsField(name, vtype))
-
-        if new_fields:
-            provider.addAttributes(new_fields)
-            layer.updateFields()
+                layer.addAttribute(QgsField(name, vtype))
+        layer.updateFields()

@@ -78,10 +78,35 @@ class JGraphDialog(QDialog):
         self.layout_check = QCheckBox("Generate j-graph layout layers")
         self.layout_check.setChecked(True)
         self.layout_check.setToolTip(
-            "Creates two new temporary layers showing the classic tree-like j-graph diagram,\n"
-            "with the base node at the bottom and spaces arranged by depth level."
+            "Creates two new temporary layers showing the j-graph diagram."
         )
         opt_form.addRow(self.layout_check)
+
+        self.layout_type_combo = QComboBox()
+        self.layout_type_combo.addItem("Tree (top-down)", userData="tree")
+        self.layout_type_combo.addItem("Radial (concentric circles)", userData="radial")
+        self.layout_type_combo.currentIndexChanged.connect(self._on_layout_type_changed)
+        opt_form.addRow("Layout type:", self.layout_type_combo)
+
+        self.node_spacing_spin = QDoubleSpinBox()
+        self.node_spacing_spin.setDecimals(2)
+        self.node_spacing_spin.setMinimum(0.01)
+        self.node_spacing_spin.setMaximum(100000.0)
+        self.node_spacing_spin.setValue(10.0)
+        self.node_spacing_spin.setToolTip(
+            "Horizontal distance between nodes at the same depth level (in map units)."
+        )
+        opt_form.addRow("Node spacing (horizontal):", self.node_spacing_spin)
+
+        self.level_spacing_spin = QDoubleSpinBox()
+        self.level_spacing_spin.setDecimals(2)
+        self.level_spacing_spin.setMinimum(0.01)
+        self.level_spacing_spin.setMaximum(100000.0)
+        self.level_spacing_spin.setValue(10.0)
+        self.level_spacing_spin.setToolTip(
+            "Vertical distance between depth levels (in map units)."
+        )
+        opt_form.addRow("Level spacing (vertical):", self.level_spacing_spin)
 
         layout.addWidget(opt_group)
 
@@ -151,6 +176,34 @@ class JGraphDialog(QDialog):
                     seen.add(label)
                     self.base_node_combo.addItem(label, userData=feat.id())
 
+    def _on_layout_type_changed(self, _index):
+        """Update spacing labels and visibility based on layout type."""
+        layout_type = self.layout_type_combo.currentData()
+        form = self.node_spacing_spin.parent().layout()
+        if layout_type == "radial":
+            self.node_spacing_spin.setVisible(False)
+            # Hide the node spacing row label
+            label_widget = form.labelForField(self.node_spacing_spin)
+            if label_widget:
+                label_widget.setVisible(False)
+            label_widget = form.labelForField(self.level_spacing_spin)
+            if label_widget:
+                label_widget.setText("Ring spacing (radius):")
+            self.level_spacing_spin.setToolTip(
+                "Radial distance between concentric depth rings (in map units)."
+            )
+        else:
+            self.node_spacing_spin.setVisible(True)
+            label_widget = form.labelForField(self.node_spacing_spin)
+            if label_widget:
+                label_widget.setVisible(True)
+            label_widget = form.labelForField(self.level_spacing_spin)
+            if label_widget:
+                label_widget.setText("Level spacing (vertical):")
+            self.level_spacing_spin.setToolTip(
+                "Vertical distance between depth levels (in map units)."
+            )
+
     def get_node_layer(self):
         return self.node_layer_combo.currentLayer()
 
@@ -165,6 +218,15 @@ class JGraphDialog(QDialog):
 
     def get_generate_layout(self):
         return self.layout_check.isChecked()
+
+    def get_node_spacing(self):
+        return self.node_spacing_spin.value()
+
+    def get_level_spacing(self):
+        return self.level_spacing_spin.value()
+
+    def get_layout_type(self):
+        return self.layout_type_combo.currentData()
 
     def get_base_node_fid(self):
         """Return the feature ID of the selected base node, or None."""
