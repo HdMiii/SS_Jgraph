@@ -1,11 +1,9 @@
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QDoubleSpinBox, QPushButton, QCheckBox, QGroupBox,
+    QDialog, QVBoxLayout, QLabel, QComboBox,
+    QDoubleSpinBox, QCheckBox, QGroupBox,
     QDialogButtonBox, QProgressBar, QMessageBox, QFormLayout,
-    QSpinBox
 )
-from qgis.PyQt.QtCore import Qt
-from qgis.core import QgsMapLayerProxyModel, QgsWkbTypes, QgsFeatureRequest
+from qgis.core import QgsMapLayerProxyModel
 from qgis.gui import QgsMapLayerComboBox
 
 

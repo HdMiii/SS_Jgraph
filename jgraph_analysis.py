@@ -232,7 +232,7 @@ def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e
         return None
 
     edges = []
-    for _lid, vertices in line_geometries.items():
+    for lid, vertices in line_geometries.items():
         if not vertices:
             continue
         try:
@@ -247,6 +247,6 @@ def match_line_endpoints_to_nodes(node_geometries, line_geometries, tolerance=1e
         a = snap(sx, sy)
         b = snap(ex, ey)
         if a is not None and b is not None and a != b:
-            edges.append((a, b, _lid))
+            edges.append((a, b, lid))
 
     return edges

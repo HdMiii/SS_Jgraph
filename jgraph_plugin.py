@@ -10,14 +10,14 @@ import os
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
-    QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY,
-    QgsProject, QgsWkbTypes, edit
+    QgsVectorLayer, QgsVectorDataProvider, QgsField, QgsFeature,
+    QgsGeometry, QgsPointXY, QgsProject, QgsWkbTypes, edit
 )
 from qgis.PyQt.QtCore import QVariant
 
 from .jgraph_dialog import JGraphDialog
 from .jgraph_analysis import (
-    run_analysis, match_line_endpoints_to_nodes, bfs_depth,
+    run_analysis, match_line_endpoints_to_nodes,
     build_graph, compute_jgraph_layout
 )
 
@@ -83,6 +83,20 @@ class JGraphPlugin:
             raise
 
     def _run_analysis(self, node_layer, edge_layer, tolerance, overwrite, base_fid, generate_layout, dlg):
+        # --- Check for projected CRS ---
+        node_crs = node_layer.crs()
+        if node_crs.isGeographic():
+            QMessageBox.warning(
+                None, "J-Graph",
+                f"The node layer '{node_layer.name()}' uses a geographic CRS "
+                f"({node_crs.authid()}).\n\n"
+                "J-Graph analysis requires a projected CRS so that distances "
+                "are in linear units (metres, feet, etc.).\n\n"
+                "Please reproject your layers first:\n"
+                "  Processing → Toolbox → Reproject Layer"
+            )
+            return
+
         # --- Collect node geometries ---
         node_geoms = {}   # fid -> QgsPointXY
         for feat in node_layer.getFeatures():
@@ -98,7 +112,6 @@ class JGraphPlugin:
 
         # --- Check layer is editable ---
         caps = node_layer.dataProvider().capabilities()
-        from qgis.core import QgsVectorDataProvider
         if not (caps & QgsVectorDataProvider.AddAttributes and
                 caps & QgsVectorDataProvider.ChangeAttributeValues):
             QMessageBox.warning(
@@ -255,7 +268,8 @@ class JGraphPlugin:
                 orig_edge_feats[feat.id()] = feat
 
         # --- Node layout layer ---
-        node_vl = QgsVectorLayer("Point?crs=EPSG:4326", "J-Graph Layout — Nodes", "memory")
+        crs_id = node_layer.crs().authid() if node_layer is not None else "EPSG:4326"
+        node_vl = QgsVectorLayer(f"Point?crs={crs_id}", "J-Graph Layout — Nodes", "memory")
         node_pr = node_vl.dataProvider()
 
         # Build field list: original node fields (already include jg_* written earlier) + node_fid
@@ -313,7 +327,7 @@ class JGraphPlugin:
         node_vl.updateExtents()
 
         # --- Edge layout layer ---
-        edge_vl = QgsVectorLayer("LineString?crs=EPSG:4326", "J-Graph Layout — Edges", "memory")
+        edge_vl = QgsVectorLayer(f"LineString?crs={crs_id}", "J-Graph Layout — Edges", "memory")
         edge_pr = edge_vl.dataProvider()
 
         # Build field list: original edge fields + from_fid / to_fid identifiers
@@ -370,7 +384,22 @@ class JGraphPlugin:
         QgsProject.instance().addMapLayer(node_vl)
 
     def _ensure_fields(self, layer, overwrite):
-        """Add output fields to layer if they don't exist."""
+        """Add output fields to layer if they don't exist.
+
+        If *overwrite* is True and a field already exists, delete it first so
+        it is re-created with the canonical type defined in OUTPUT_FIELDS.
+        """
+        provider = layer.dataProvider()
+        existing = {f.name(): i for i, f in enumerate(layer.fields())}
+
+        if overwrite:
+            indices_to_delete = [existing[name] for name, _, _ in OUTPUT_FIELDS
+                                 if name in existing]
+            if indices_to_delete:
+                provider.deleteAttributes(indices_to_delete)
+                layer.updateFields()
+
+        # Re-read after possible deletion
         existing = [f.name() for f in layer.fields()]
         new_fields = []
         for name, vtype, _ in OUTPUT_FIELDS:
@@ -378,5 +407,5 @@ class JGraphPlugin:
                 new_fields.append(QgsField(name, vtype))
 
         if new_fields:
-            layer.dataProvider().addAttributes(new_fields)
+            provider.addAttributes(new_fields)
             layer.updateFields()
